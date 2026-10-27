@@ -8,7 +8,9 @@ How the vuln works:
   - After logging in, a user lands on /profile?user_id=<their own id>
   - The server NEVER checks that the logged-in user actually owns that id
   - So changing the number in the URL shows you someone else's badge
-  - One "staff" account (id 1) holds the flag
+  - One "staff" account (not id 1 - deliberately not the obvious guess)
+    holds the flag, mixed in among several decoy profiles with no
+    login of their own, so people have to actually enumerate IDs
 
 Run it with:  python3 app.py
 Then visit:   http://127.0.0.1:5050
@@ -24,44 +26,118 @@ app.secret_key = "workshop-demo-not-for-production"  # fine for a local demo onl
 # ---------------------------------------------------------------------------
 USERS = {
     1: {
-        "username": "admin",
-        "password": "cl4ssif1ed",
-        "display_name": "Staff Admin",
-        "role": "SYSTEM OPERATOR",
-        "bio": "Club staff account. Do not share credentials.",
-        "secret": "FLAG{1D0R_1S_N3V3R_TRUST_TH3_US3R}",
-        "is_flag_account": True,
-    },
-    2: {
-        "username": "alice",
-        "password": "alice123",
-        "display_name": "Alice",
-        "role": "MEMBER",
-        "bio": "First-year, into CTFs and bad puns.",
-        "secret": "Meeting notes draft #3 due Thursday.",
-        "is_flag_account": False,
-    },
-    3: {
         "username": "bob",
         "password": "bob123",
         "display_name": "Bob",
         "role": "MEMBER",
+        "team": "Networking",
+        "joined": "Sep 2025",
         "bio": "Still figuring out regex. Send help.",
         "secret": "Forgot where I parked. Again.",
         "is_flag_account": False,
     },
+    2: {
+        "username": None,
+        "password": None,
+        "display_name": "Youssef",
+        "role": "MEMBER",
+        "team": "OSINT",
+        "joined": "Oct 2025",
+        "bio": "Can find anyone's old Facebook in under 5 minutes.",
+        "secret": "Still owes Karim 50 EGP from the pizza order.",
+        "is_flag_account": False,
+    },
+    3: {
+        "username": "alice",
+        "password": "alice123",
+        "display_name": "Alice",
+        "role": "MEMBER",
+        "team": "Web Security",
+        "joined": "Sep 2025",
+        "bio": "First-year, into CTFs and bad puns.",
+        "secret": "Meeting notes draft #3 due Thursday.",
+        "is_flag_account": False,
+    },
     4: {
+        "username": None,
+        "password": None,
+        "display_name": "Laila",
+        "role": "MEMBER",
+        "team": "Reverse Engineering",
+        "joined": "Nov 2025",
+        "bio": "Reads disassembly for fun, apparently.",
+        "secret": "Still debugging the same segfault from Tuesday.",
+        "is_flag_account": False,
+    },
+    5: {
+        "username": None,
+        "password": None,
+        "display_name": "Karim",
+        "role": "MEMBER",
+        "team": "Networking",
+        "joined": "Sep 2025",
+        "bio": "Brings snacks to every session. A true hero.",
+        "secret": "Hid the good snacks from Youssef on purpose.",
+        "is_flag_account": False,
+    },
+    6: {
         "username": "mina",
         "password": "mina123",
         "display_name": "Mina",
         "role": "MEMBER",
+        "team": "OSINT",
+        "joined": "Oct 2025",
         "bio": "Here for the free pizza, staying for the CTFs.",
         "secret": "Don't forget to water the office plant.",
         "is_flag_account": False,
     },
+    7: {
+        "username": "admin",
+        "password": "cl4ssif1ed",
+        "display_name": "Staff Admin",
+        "role": "SYSTEM OPERATOR",
+        "team": "Club Administration",
+        "joined": "Feb 2024",
+        "bio": "Club staff account. Do not share credentials.",
+        "secret": "FLAG{1D0R_1S_N3V3R_TRUST_TH3_US3R}",
+        "is_flag_account": True,
+    },
+    8: {
+        "username": None,
+        "password": None,
+        "display_name": "Noor",
+        "role": "MEMBER",
+        "team": "Web Security",
+        "joined": "Oct 2025",
+        "bio": "Broke the lab Wi-Fi once. Once.",
+        "secret": "Actually broke it twice. Nobody noticed the second time.",
+        "is_flag_account": False,
+    },
+    9: {
+        "username": "sara",
+        "password": "sara123",
+        "display_name": "Sara",
+        "role": "MEMBER",
+        "team": "Reverse Engineering",
+        "joined": "Nov 2025",
+        "bio": "Prefers Ghidra over everything else. Will fight you on this.",
+        "secret": "Taking Thursday off to study for the networking midterm.",
+        "is_flag_account": False,
+    },
+    10: {
+        "username": None,
+        "password": None,
+        "display_name": "Hassan",
+        "role": "MEMBER",
+        "team": "Web Security",
+        "joined": "Sep 2025",
+        "bio": "Joined for the free pizza. Stayed for more pizza.",
+        "secret": "Still hasn't finished the onboarding checklist.",
+        "is_flag_account": False,
+    },
 }
 
-USERNAME_TO_ID = {u["username"]: uid for uid, u in USERS.items()}
+USERNAME_TO_ID = {u["username"]: uid for uid, u in USERS.items() if u["username"]}
 
 
 # ---------------------------------------------------------------------------
@@ -292,25 +368,28 @@ BASE_STYLE = """
     margin-top: 3px;
   }
 
-  .badge-id-box {
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .info-cell {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 12px 14px;
-    margin-bottom: 16px;
+    padding: 10px 12px;
   }
-  .badge-id-label {
+  .info-label {
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px;
     color: var(--text-dim);
     margin-bottom: 4px;
   }
-  .badge-id-value {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 26px;
-    font-weight: 700;
-    color: var(--accent);
-    letter-spacing: 0.02em;
+  .info-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
   }
 
   .bio {
@@ -432,9 +511,15 @@ PROFILE_CONTENT = """
     </div>
   </div>
 
-  <div class="badge-id-box">
-    <div class="badge-id-label">BADGE ID</div>
-    <div class="badge-id-value">{{ "%04d"|format(user.id) }}</div>
+  <div class="info-grid">
+    <div class="info-cell">
+      <div class="info-label">TEAM</div>
+      <div class="info-value">{{ user.team }}</div>
+    </div>
+    <div class="info-cell">
+      <div class="info-label">JOINED</div>
+      <div class="info-value">{{ user.joined }}</div>
+    </div>
   </div>
 
   <div class="bio">{{ user.bio }}</div>

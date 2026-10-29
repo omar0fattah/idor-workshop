@@ -1,143 +1,111 @@
 """
-IDOR Workshop Demo App
------------------------
-A deliberately vulnerable mini Flask app for teaching Insecure Direct
-Object Reference (IDOR) to beginners.
+IDOR + SQL Injection Workshop Demo App
+----------------------------------------
+A deliberately vulnerable mini Flask app for teaching two bugs in one
+sitting: SQL Injection (the way in) and Insecure Direct Object Reference
+(what you do once you're in).
 
-How the vuln works:
-  - After logging in, a user lands on /profile?user_id=<their own id>
-  - The server NEVER checks that the logged-in user actually owns that id
-  - So changing the number in the URL shows you someone else's badge
-  - One "staff" account (not id 1 - deliberately not the obvious guess)
-    holds the flag, mixed in among several decoy profiles with no
-    login of their own, so people have to actually enumerate IDs
+How the vuln chain works:
+  - The login form builds its SQL query with raw string formatting, so a
+    classic auth-bypass payload (e.g.  ' OR '1'='1' --  ) in the username
+    field returns a row without needing a real password. No credentials
+    are given out anywhere in the UI on purpose - this is the way in.
+  - Because the query has no ORDER BY, the bypass payload lands you on
+    whichever row SQLite returns first (a normal member, not staff), so
+    you land as a regular user - not instantly at the flag.
+  - From there, /profile?user_id=<id> never checks that the logged-in
+    user actually owns that id. So changing the number in the URL shows
+    you someone else's badge. One "staff" account (not id 1 - not the
+    obvious guess) holds the flag, mixed in among several decoy profiles
+    with no login of their own, so people have to actually enumerate IDs.
 
 Run it with:  python3 app.py
 Then visit:   http://127.0.0.1:5050
 """
+
+import sqlite3
+from pathlib import Path
 
 from flask import Flask, request, redirect, session, render_template_string
 
 app = Flask(__name__)
 app.secret_key = "workshop-demo-not-for-production"  # fine for a local demo only
 
-# ---------------------------------------------------------------------------
-# Fake user "database" - just a dict, no real DB needed for a 1-hour workshop
-# ---------------------------------------------------------------------------
-USERS = {
-    1: {
-        "username": "bob",
-        "password": "bob123",
-        "display_name": "Bob",
-        "role": "MEMBER",
-        "team": "Networking",
-        "joined": "Sep 2025",
-        "bio": "Still figuring out regex. Send help.",
-        "secret": "Forgot where I parked. Again.",
-        "is_flag_account": False,
-    },
-    2: {
-        "username": None,
-        "password": None,
-        "display_name": "Youssef",
-        "role": "MEMBER",
-        "team": "OSINT",
-        "joined": "Oct 2025",
-        "bio": "Can find anyone's old Facebook in under 5 minutes.",
-        "secret": "Still owes Karim 50 EGP from the pizza order.",
-        "is_flag_account": False,
-    },
-    3: {
-        "username": "alice",
-        "password": "alice123",
-        "display_name": "Alice",
-        "role": "MEMBER",
-        "team": "Web Security",
-        "joined": "Sep 2025",
-        "bio": "First-year, into CTFs and bad puns.",
-        "secret": "Meeting notes draft #3 due Thursday.",
-        "is_flag_account": False,
-    },
-    4: {
-        "username": None,
-        "password": None,
-        "display_name": "Laila",
-        "role": "MEMBER",
-        "team": "Reverse Engineering",
-        "joined": "Nov 2025",
-        "bio": "Reads disassembly for fun, apparently.",
-        "secret": "Still debugging the same segfault from Tuesday.",
-        "is_flag_account": False,
-    },
-    5: {
-        "username": None,
-        "password": None,
-        "display_name": "Karim",
-        "role": "MEMBER",
-        "team": "Networking",
-        "joined": "Sep 2025",
-        "bio": "Brings snacks to every session. A true hero.",
-        "secret": "Hid the good snacks from Youssef on purpose.",
-        "is_flag_account": False,
-    },
-    6: {
-        "username": "mina",
-        "password": "mina123",
-        "display_name": "Mina",
-        "role": "MEMBER",
-        "team": "OSINT",
-        "joined": "Oct 2025",
-        "bio": "Here for the free pizza, staying for the CTFs.",
-        "secret": "Don't forget to water the office plant.",
-        "is_flag_account": False,
-    },
-    7: {
-        "username": "admin",
-        "password": "cl4ssif1ed",
-        "display_name": "Staff Admin",
-        "role": "SYSTEM OPERATOR",
-        "team": "Club Administration",
-        "joined": "Feb 2024",
-        "bio": "Club staff account. Do not share credentials.",
-        "secret": "FLAG{1D0R_1S_N3V3R_TRUST_TH3_US3R}",
-        "is_flag_account": True,
-    },
-    8: {
-        "username": None,
-        "password": None,
-        "display_name": "Noor",
-        "role": "MEMBER",
-        "team": "Web Security",
-        "joined": "Oct 2025",
-        "bio": "Broke the lab Wi-Fi once. Once.",
-        "secret": "Actually broke it twice. Nobody noticed the second time.",
-        "is_flag_account": False,
-    },
-    9: {
-        "username": "sara",
-        "password": "sara123",
-        "display_name": "Sara",
-        "role": "MEMBER",
-        "team": "Reverse Engineering",
-        "joined": "Nov 2025",
-        "bio": "Prefers Ghidra over everything else. Will fight you on this.",
-        "secret": "Taking Thursday off to study for the networking midterm.",
-        "is_flag_account": False,
-    },
-    10: {
-        "username": None,
-        "password": None,
-        "display_name": "Hassan",
-        "role": "MEMBER",
-        "team": "Web Security",
-        "joined": "Sep 2025",
-        "bio": "Joined for the free pizza. Stayed for more pizza.",
-        "secret": "Still hasn't finished the onboarding checklist.",
-        "is_flag_account": False,
-    },
-}
+DB_PATH = Path(__file__).parent / "workshop.db"
 
-USERNAME_TO_ID = {u["username"]: uid for uid, u in USERS.items() if u["username"]}
+# ---------------------------------------------------------------------------
+# Seed data - inserted in this order, which matters: the classic
+# ' OR '1'='1' --  bypass has no ORDER BY, so it returns the FIRST row
+# SQLite has (Bob), not the admin. People still have to go find the
+# admin's id themselves via IDOR afterward.
+# ---------------------------------------------------------------------------
+SEED_USERS = [
+    # (username, password, display_name, role, team, joined, bio, secret, is_flag_account)
+    ("bob", "bob123", "Bob", "MEMBER", "Networking", "Sep 2025",
+     "Still figuring out regex. Send help.",
+     "Forgot where I parked. Again.", 0),
+    (None, None, "Youssef", "MEMBER", "OSINT", "Oct 2025",
+     "Can find anyone's old Facebook in under 5 minutes.",
+     "Still owes Karim 50 EGP from the pizza order.", 0),
+    ("alice", "alice123", "Alice", "MEMBER", "Web Security", "Sep 2025",
+     "First-year, into CTFs and bad puns.",
+     "Meeting notes draft #3 due Thursday.", 0),
+    (None, None, "Laila", "MEMBER", "Reverse Engineering", "Nov 2025",
+     "Reads disassembly for fun, apparently.",
+     "Still debugging the same segfault from Tuesday.", 0),
+    (None, None, "Karim", "MEMBER", "Networking", "Sep 2025",
+     "Brings snacks to every session. A true hero.",
+     "Hid the good snacks from Youssef on purpose.", 0),
+    ("mina", "mina123", "Mina", "MEMBER", "OSINT", "Oct 2025",
+     "Here for the free pizza, staying for the CTFs.",
+     "Don't forget to water the office plant.", 0),
+    ("admin", "cl4ssif1ed", "Staff Admin", "SYSTEM OPERATOR", "Club Administration", "Feb 2024",
+     "Club staff account. Do not share credentials.",
+     "FLAG{1D0R_1S_N3V3R_TRUST_TH3_US3R}", 1),
+    (None, None, "Noor", "MEMBER", "Web Security", "Oct 2025",
+     "Broke the lab Wi-Fi once. Once.",
+     "Actually broke it twice. Nobody noticed the second time.", 0),
+    ("sara", "sara123", "Sara", "MEMBER", "Reverse Engineering", "Nov 2025",
+     "Prefers Ghidra over everything else. Will fight you on this.",
+     "Taking Thursday off to study for the networking midterm.", 0),
+    (None, None, "Hassan", "MEMBER", "Web Security", "Sep 2025",
+     "Joined for the free pizza. Stayed for more pizza.",
+     "Still hasn't finished the onboarding checklist.", 0),
+]
+
+
+def init_db():
+    """(Re)create the DB fresh every time the app starts, so the demo
+    always begins in a known state."""
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DROP TABLE IF EXISTS users")
+    con.execute("""
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            password TEXT,
+            display_name TEXT,
+            role TEXT,
+            team TEXT,
+            joined TEXT,
+            bio TEXT,
+            secret TEXT,
+            is_flag_account INTEGER
+        )
+    """)
+    con.executemany(
+        "INSERT INTO users (username, password, display_name, role, team, joined, bio, secret, is_flag_account) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        SEED_USERS,
+    )
+    con.commit()
+    con.close()
+
+
+def get_db():
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    return con
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +250,8 @@ BASE_STYLE = """
     padding: 9px 12px;
     border-radius: 8px;
     margin-bottom: 16px;
+    font-family: 'JetBrains Mono', monospace;
+    word-break: break-word;
   }
 
   .hint {
@@ -474,7 +444,7 @@ LOGIN_CONTENT = """
 <div class="gate">
   <div class="gate-head">
     <h1>Club Access Terminal</h1>
-    <p>Authenticate to view your member badge.</p>
+    <p>Authenticate with your issued access code.</p>
   </div>
   <div class="gate-body">
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
@@ -490,8 +460,7 @@ LOGIN_CONTENT = """
       <button class="submit" type="submit">Authenticate</button>
     </form>
     <div class="hint">
-      Demo accounts: <code>alice</code> / <code>bob</code> / <code>mina</code><br>
-      Password is <code>&lt;username&gt;123</code>
+      No access code issued? You weren't given one on purpose.
     </div>
   </div>
 </div>
@@ -566,12 +535,30 @@ def login():
     username = request.form.get("username", "")
     password = request.form.get("password", "")
 
-    uid = USERNAME_TO_ID.get(username)
-    if uid is None or USERS[uid]["password"] != password:
+    # --- VULNERABILITY #1: SQL INJECTION ---
+    # Raw string formatting straight into the query. No parameterization,
+    # no escaping. A payload like  ' OR '1'='1' --  in the username field
+    # turns this into "WHERE username = '' OR '1'='1' --' AND password=..."
+    # which SQLite happily evaluates as always-true, and the trailing
+    # "-- " comments out the rest of the line including the password check.
+    query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'"
+
+    con = get_db()
+    try:
+        row = con.execute(query).fetchone()
+    except sqlite3.Error as e:
+        # Deliberately not sanitized: a broken payload shows the raw DB
+        # error, which is itself a common real-world way people first
+        # notice an injection point.
+        con.close()
+        return render(LOGIN_CONTENT, error=f"Database error: {e}")
+    con.close()
+
+    if row is None:
         return render(LOGIN_CONTENT, error="Access denied. Check your credentials.")
 
-    session["user_id"] = uid
-    return redirect(f"/profile?user_id={uid}")
+    session["user_id"] = row["id"]
+    return redirect(f"/profile?user_id={row['id']}")
 
 
 @app.route("/profile")
@@ -579,23 +566,28 @@ def profile():
     if "user_id" not in session:
         return redirect("/login")
 
-    me = USERS[session["user_id"]]
+    con = get_db()
+    me_row = con.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],)).fetchone()
 
-    # --- THE VULNERABILITY ---
+    # --- VULNERABILITY #2: IDOR ---
     # We trust whatever user_id is in the URL instead of forcing it to
     # match session["user_id"]. This is a textbook IDOR.
     requested_id = request.args.get("user_id", type=int)
-    if requested_id is None or requested_id not in USERS:
-        requested_id = session["user_id"]
+    shown_row = None
+    if requested_id is not None:
+        shown_row = con.execute("SELECT * FROM users WHERE id = ?", (requested_id,)).fetchone()
+    if shown_row is None:
+        shown_row = me_row
+        requested_id = me_row["id"]
+    con.close()
 
-    shown_user = dict(USERS[requested_id])
-    shown_user["id"] = requested_id
+    shown_user = dict(shown_row)
     shown_user["initial"] = shown_user["display_name"][0].upper()
 
     # deterministic "barcode" pattern so it doesn't jump around on reload
     bars = [10 + ((requested_id * 37 + i * 13) % 18) for i in range(28)]
 
-    return render(PROFILE_CONTENT, user=shown_user, me=me, bars=bars)
+    return render(PROFILE_CONTENT, user=shown_user, me=dict(me_row), bars=bars)
 
 
 @app.route("/logout")
@@ -603,6 +595,8 @@ def logout():
     session.clear()
     return redirect("/login")
 
+
+init_db()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5050, debug=False)
